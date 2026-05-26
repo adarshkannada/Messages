@@ -1,6 +1,7 @@
 package org.fossify.messages.activities
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.ShortcutInfo
@@ -51,13 +52,17 @@ import org.fossify.messages.extensions.*
 import org.fossify.messages.helpers.*
 import org.fossify.messages.models.Conversation
 import org.fossify.messages.models.Events
+import org.fossify.messages.models.Reminder
 import org.fossify.messages.models.Message
 import org.fossify.messages.models.SearchResult
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
 import java.util.ArrayList
+import java.util.Date
 import java.util.Locale
 
 class MainActivity : SimpleActivity() {
@@ -66,7 +71,7 @@ class MainActivity : SimpleActivity() {
     private val MAKE_DEFAULT_APP_REQUEST = 1
 
     enum class Tab {
-        PERSONAL, FINANCIAL, OTHERS
+        PERSONAL, FINANCIAL, OTHERS, REMINDERS
     }
 
     enum class ConversationFilter {
@@ -176,6 +181,14 @@ class MainActivity : SimpleActivity() {
                                         activity = this,
                                         textId = org.fossify.commons.R.string.allow_notifications_incoming_messages,
                                         positiveActionCallback = { openNotificationSettings() })
+                                }
+                            }
+
+                            if (isTiramisuPlus()) {
+                                val alarmManager = getSystemService(AlarmManager::class.java)
+                                if (!alarmManager.canScheduleExactAlarms()) {
+                                    val intent = Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                                    startActivity(intent)
                                 }
                             }
 
@@ -529,6 +542,20 @@ class MainActivity : SimpleActivity() {
         var currentTab by remember { mutableStateOf(Tab.PERSONAL) }
         var currentFilter by remember { mutableStateOf(ConversationFilter.ALL) }
         var isMenuSheetOpen by remember { mutableStateOf(false) }
+        var isAddReminderDialogOpen by remember { mutableStateOf(false) }
+        val remindersStateList = remember { mutableStateListOf<Reminder>() }
+
+        LaunchedEffect(currentTab) {
+            if (currentTab == Tab.REMINDERS) {
+                ensureBackgroundThread {
+                    val reminders = getMessagesDB().RemindersDao().getAllReminders()
+                    runOnUiThread {
+                        remindersStateList.clear()
+                        remindersStateList.addAll(reminders)
+                    }
+                }
+            }
+        }
 
         BackHandler(enabled = selectedThreadIds.isNotEmpty() || isSearchOpen.value) {
             if (selectedThreadIds.isNotEmpty()) {
@@ -558,6 +585,7 @@ class MainActivity : SimpleActivity() {
                     Tab.PERSONAL -> list.filter { isPersonal(it) }
                     Tab.FINANCIAL -> list.filter { isFinancial(it) }
                     Tab.OTHERS -> list.filter { !isPersonal(it) && !isFinancial(it) }
+                    Tab.REMINDERS -> emptyList()
                 }
             }
         }
@@ -636,6 +664,12 @@ class MainActivity : SimpleActivity() {
                         label = { Text(getString(R.string.tab_others), fontWeight = if (currentTab == Tab.OTHERS) FontWeight.Bold else FontWeight.Normal) }
                     )
                     NavigationBarItem(
+                        selected = currentTab == Tab.REMINDERS,
+                        onClick = { currentTab = Tab.REMINDERS },
+                        icon = { Icon(Icons.Default.Notifications, contentDescription = "Reminders") },
+                        label = { Text("Reminders", fontWeight = if (currentTab == Tab.REMINDERS) FontWeight.Bold else FontWeight.Normal) }
+                    )
+                    NavigationBarItem(
                         selected = false,
                         onClick = { isMenuSheetOpen = true },
                         icon = { Icon(Icons.Default.Menu, contentDescription = getString(R.string.menu)) },
@@ -644,13 +678,24 @@ class MainActivity : SimpleActivity() {
                 }
             },
             floatingActionButton = {
-                FloatingActionButton(
-                    onClick = { launchNewConversation() },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = getString(R.string.new_conversation))
+                if (currentTab == Tab.REMINDERS) {
+                    FloatingActionButton(
+                        onClick = { isAddReminderDialogOpen = true },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Reminder")
+                    }
+                } else {
+                    FloatingActionButton(
+                        onClick = { launchNewConversation() },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = getString(R.string.new_conversation))
+                    }
                 }
             }
         ) { paddingValues ->
@@ -659,12 +704,14 @@ class MainActivity : SimpleActivity() {
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-                // Category filters
-                CategoryFilterRow(
-                    currentTab = currentTab,
-                    selectedFilter = currentFilter,
-                    onFilterSelected = { currentFilter = it }
-                )
+                if (currentTab != Tab.REMINDERS) {
+                    // Category filters
+                    CategoryFilterRow(
+                        currentTab = currentTab,
+                        selectedFilter = currentFilter,
+                        onFilterSelected = { currentFilter = it }
+                    )
+                }
 
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -672,6 +719,37 @@ class MainActivity : SimpleActivity() {
                 ) {
                     if (isProgressLoading.value) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    } else if (currentTab == Tab.REMINDERS) {
+                        if (remindersStateList.isEmpty()) {
+                            Text(
+                                text = "No reminders found",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                items(remindersStateList, key = { it.id!! }) { reminder ->
+                                    ReminderListItem(reminder = reminder) {
+                                        if (reminder.smsThreadId != null) {
+                                            handleConversationClick(conversationsStateList.find { it.threadId == reminder.smsThreadId }
+                                                ?: Conversation(
+                                                    threadId = reminder.smsThreadId,
+                                                    snippet = "",
+                                                    date = 0,
+                                                    read = true,
+                                                    title = reminder.title,
+                                                    photoUri = "",
+                                                    isGroupConversation = false,
+                                                    phoneNumber = "",
+                                                    isArchived = false,
+                                                    unreadCount = 0
+                                                ))
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     } else if (finalList.value.isEmpty()) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -768,6 +846,137 @@ class MainActivity : SimpleActivity() {
                     )
                 }
             }
+        }
+
+        if (isAddReminderDialogOpen) {
+            AddReminderDialog(
+                onDismiss = { isAddReminderDialogOpen = false },
+                onConfirm = { title, dueDate, threadId ->
+                    ensureBackgroundThread {
+                        getMessagesDB().RemindersDao().insert(Reminder(title = title, dueDate = dueDate, smsThreadId = threadId))
+                        val reminders = getMessagesDB().RemindersDao().getAllReminders()
+                        runOnUiThread {
+                            remindersStateList.clear()
+                            remindersStateList.addAll(reminders)
+                            isAddReminderDialogOpen = false
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    @Composable
+    private fun AddReminderDialog(
+        onDismiss: () -> Unit,
+        onConfirm: (String, Long, Long?) -> Unit
+    ) {
+        var title by remember { mutableStateOf("") }
+        var selectedDate by remember { mutableLongStateOf(System.currentTimeMillis()) }
+        var selectedThreadId by remember { mutableStateOf<Long?>(null) }
+        var isThreadPickerOpen by remember { mutableStateOf(false) }
+
+        val context = LocalContext.current
+        val calendar = Calendar.getInstance()
+
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("New Reminder") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextField(
+                        value = title,
+                        onValueChange = { title = it },
+                        label = { Text("Title") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Button(
+                        onClick = {
+                            android.app.DatePickerDialog(
+                                context,
+                                { _, year, month, day ->
+                                    calendar.timeInMillis = selectedDate
+                                    calendar.set(Calendar.YEAR, year)
+                                    calendar.set(Calendar.MONTH, month)
+                                    calendar.set(Calendar.DAY_OF_MONTH, day)
+                                    selectedDate = calendar.timeInMillis
+                                },
+                                calendar.get(Calendar.YEAR),
+                                calendar.get(Calendar.MONTH),
+                                calendar.get(Calendar.DAY_OF_MONTH)
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val dateText = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(selectedDate))
+                        Text("Date: $dateText")
+                    }
+
+                    Button(
+                        onClick = {
+                            android.app.TimePickerDialog(
+                                context,
+                                { _, hour, minute ->
+                                    calendar.timeInMillis = selectedDate
+                                    calendar.set(Calendar.HOUR_OF_DAY, hour)
+                                    calendar.set(Calendar.MINUTE, minute)
+                                    selectedDate = calendar.timeInMillis
+                                },
+                                calendar.get(Calendar.HOUR_OF_DAY),
+                                calendar.get(Calendar.MINUTE),
+                                true
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val timeText = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(selectedDate))
+                        Text("Time: $timeText")
+                    }
+
+                    OutlinedButton(
+                        onClick = { isThreadPickerOpen = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val thread = conversationsStateList.find { it.threadId == selectedThreadId }
+                        Text(if (selectedThreadId == null) "Link Conversation (Optional)" else "Linked: ${thread?.title}")
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    onConfirm(title, selectedDate, selectedThreadId)
+                }) {
+                    Text("Add")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel")
+                }
+            }
+        )
+
+        if (isThreadPickerOpen) {
+            AlertDialog(
+                onDismissRequest = { isThreadPickerOpen = false },
+                title = { Text("Select Conversation") },
+                text = {
+                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                        items(conversationsStateList) { conversation ->
+                            ListItem(
+                                headlineContent = { Text(conversation.title) },
+                                modifier = Modifier.clickable {
+                                    selectedThreadId = conversation.threadId
+                                    if (title.isEmpty()) title = "Reminder: ${conversation.title}"
+                                    isThreadPickerOpen = false
+                                }
+                            )
+                        }
+                    }
+                },
+                confirmButton = {}
+            )
         }
     }
 
@@ -1142,6 +1351,54 @@ class MainActivity : SimpleActivity() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    @Composable
+    private fun ReminderListItem(
+        reminder: Reminder,
+        onClick: () -> Unit
+    ) {
+        val dateStr = remember(reminder.dueDate) {
+            SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()).format(Date(reminder.dueDate))
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.secondaryContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Notifications,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = reminder.title,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = dateStr,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

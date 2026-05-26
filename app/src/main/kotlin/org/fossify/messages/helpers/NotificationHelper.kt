@@ -161,13 +161,11 @@ class NotificationHelper(private val context: Context) {
             markAsReadPendingIntent
         )
             .setChannelId(notificationChannelId)
-        if (isNoReplySms) {
-            builder.addAction(
+            .addAction(
                 org.fossify.commons.R.drawable.ic_delete_vector,
                 context.getString(org.fossify.commons.R.string.delete),
                 deleteSmsPendingIntent
-            ).setChannelId(notificationChannelId)
-        }
+            )
 
         var shortcut = context.shortcutHelper.getShortcut(threadId)
         if (shortcut == null) {
