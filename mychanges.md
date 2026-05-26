@@ -1,4 +1,7 @@
 ### may 26
+  - minor defect fix
+  
+### may 26
   - v1.4
   - migrate UI to jetpack compose
   - UI is now inspired by whatsapp
