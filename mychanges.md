@@ -1,4 +1,10 @@
 ### may 26
+  - v1.6
+  - create auto/manual reminder from SMS
+  - link sms to reminder
+  - reminder section introduced
+### may 26
+  - v1.5
   - minor defect fix
   
 ### may 26
